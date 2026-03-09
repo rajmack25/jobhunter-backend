@@ -19,6 +19,9 @@ const MY_EMAIL = process.env.MY_EMAIL;
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const SERP_KEY = process.env.SERP_API_KEY;
 
+// Only watch this group
+const TARGET_GROUP = 'Jobs 2026';
+
 const CV_SUMMARY = `
 Timothy Jaravani - Procurement & Operations Professional
 Email: jaraztimothy@gmail.com | Phone: +263 785 010 425 | Harare, Zimbabwe
@@ -48,26 +51,23 @@ Supply Chain Operations, Operational Efficiency, Advanced Excel, ERP Systems (Sa
 Microsoft Office, Stakeholder Communication, Team Coordination
 `;
 
-const JOB_SITES = [
-  'vacancymail.co.zw', 'classifieds.co.zw', 'zimbabwejobs.co.zw',
-  'alljobszw.com', 'ihararejobs.com', 'careers.co.zw',
-  'jobszimbabwe.net', 'applynow.co.zw', 'zimngojobs.co.zw',
-  'linkedin.com/jobs', 'reliefweb.int/jobs', 'ngojobszimbabwe.com',
-  'jobboard.co.zw', 'cvpeopleafrica.com', 'prostaff.co.zw'
+// Skills Timothy has - job must match at least one
+const MY_SKILLS = [
+  'procurement', 'purchasing', 'supply chain', 'logistics', 'operations',
+  'inventory', 'warehouse', 'stores', 'admin', 'administrator',
+  'coordinator', 'manager', 'officer', 'clerk', 'bookkeeper',
+  'finance', 'accounts', 'marketing', 'project management'
 ];
 
-const JOB_TRIGGER_KEYWORDS = [
+// Must have these to confirm it's a real job post
+const JOB_CONFIRM_KEYWORDS = [
   'vacancy', 'vacancies', 'hiring', 'we are hiring', 'now hiring',
-  'job opportunity', 'job opening', 'employment opportunity',
-  'applications invited', 'applications are invited',
-  'apply now', 'apply before', 'apply by',
-  'recruitment', 'recruiter', 'we are recruiting',
-  'position available', 'post available', 'role available',
-  'job title', 'requirements:', 'qualifications required',
-  'minimum qualifications', 'key responsibilities',
+  'job opportunity', 'job opening', 'applications invited',
+  'apply now', 'apply before', 'apply by', 'apply to',
+  'recruitment', 'we are recruiting', 'position available',
+  'requirements', 'qualifications', 'key responsibilities',
   'send cv', 'send your cv', 'email cv', 'submit cv',
-  'closing date', 'deadline for applications',
-  'salary:', 'remuneration:', 'package offered'
+  'closing date', 'deadline', 'salary', 'remuneration'
 ];
 
 let qrCodeData = null;
@@ -110,15 +110,23 @@ function getAttachments() {
   return attachments;
 }
 
-function isJobMessage(text) {
-  if (!text || text.length < 100) return false;
+function isJobPost(text) {
+  if (!text || text.length < 50) return false;
   if (text.includes('JobHunter AI') || text.includes('APPROVE_') || text.includes('SKIP_')) return false;
   const lower = text.toLowerCase();
-  let matches = 0;
-  for (const keyword of JOB_TRIGGER_KEYWORDS) {
-    if (lower.includes(keyword.toLowerCase())) matches++;
+
+  // Must have at least 1 job confirmation keyword
+  const hasJobKeyword = JOB_CONFIRM_KEYWORDS.some(k => lower.includes(k.toLowerCase()));
+  if (!hasJobKeyword) return false;
+
+  // Must match at least 1 of Timothy's skills
+  const matchesSkills = MY_SKILLS.some(skill => lower.includes(skill));
+  if (!matchesSkills) {
+    console.log('Job found but skills dont match — skipping');
+    return false;
   }
-  return matches >= 2;
+
+  return true;
 }
 
 function extractJobContact(jobText) {
@@ -169,7 +177,7 @@ Make it specific to the job requirements. Do not use placeholders.`
 async function processNewJob(job) {
   if (job.notified) return;
   job.notified = true;
-  console.log('✅ Real job found from:', job.chatName || job.source);
+  console.log('✅ Relevant job found from:', job.chatName || job.source);
 
   const coverLetter = await generateCoverLetter(job.body);
   const contact = extractJobContact(job.body);
@@ -177,8 +185,8 @@ async function processNewJob(job) {
   const appId = Date.now().toString();
   pendingApplications[appId] = { job, coverLetter, contact, status: 'pending' };
 
-  const preview = job.body.slice(0, 300);
-  const source = job.chatName || job.source || 'Unknown';
+  const preview = job.body.slice(0, 400);
+  const source = job.chatName || job.source || 'Jobs 2026';
   const link = job.link ? `\n🔗 *Link:* ${job.link}` : '';
 
   const approveMsg = `🤖 *JobHunter AI — New Job Found!*
@@ -187,12 +195,12 @@ async function processNewJob(job) {
 ⏰ *Time:* ${new Date(job.time).toLocaleString('en-ZW')}
 
 📝 *Job Preview:*
-${preview}${job.body.length > 300 ? '...' : ''}
+${preview}${job.body.length > 400 ? '...' : ''}
 
 ✉️ *Contact:* ${contact.email || contact.phone || 'None detected'}
 
 📄 *Cover Letter Preview:*
-${coverLetter ? coverLetter.slice(0, 200) + '...' : 'Could not generate'}
+${coverLetter ? coverLetter.slice(0, 300) + '...' : 'Could not generate'}
 
 ---
 Reply *APPROVE* to send application
@@ -200,7 +208,7 @@ Reply *DECLINE* to skip this job`;
 
   try {
     await client.sendMessage(`${MY_PHONE}@c.us`, approveMsg);
-    console.log('WhatsApp notification sent');
+    console.log('WhatsApp notification sent to Timothy');
   } catch(e) {
     console.log('WA notify error:', e.message);
   }
@@ -247,7 +255,7 @@ async function sendApplication(appId) {
 
   const { job, coverLetter, contact } = pendingApp;
   const attachments = getAttachments();
-  const source = job.chatName || job.source || 'Unknown';
+  const source = job.chatName || job.source || 'Jobs 2026';
 
   if (contact.email) {
     try {
@@ -291,45 +299,62 @@ async function scrapeJobSites() {
   console.log('Scraping job sites...');
 
   const queries = [
-    'procurement manager Zimbabwe jobs',
-    'operations manager Zimbabwe jobs',
-    'logistics coordinator Zimbabwe jobs',
-    'supply chain Zimbabwe jobs',
-    'administrator Zimbabwe jobs'
+    'procurement manager Zimbabwe',
+    'operations manager Zimbabwe',
+    'logistics coordinator Zimbabwe',
+    'supply chain Zimbabwe',
+    'administrator Zimbabwe',
+    'stores clerk Zimbabwe',
+    'finance officer Zimbabwe'
+  ];
+
+  const JOB_SITES = [
+    'vacancymail.co.zw', 'classifieds.co.zw', 'zimbabwejobs.co.zw',
+    'alljobszw.com', 'ihararejobs.com', 'careers.co.zw',
+    'jobszimbabwe.net', 'applynow.co.zw', 'zimngojobs.co.zw',
+    'reliefweb.int', 'ngojobszimbabwe.com',
+    'jobboard.co.zw', 'cvpeopleafrica.com', 'prostaff.co.zw'
   ];
 
   for (const site of JOB_SITES) {
-    for (const query of queries.slice(0, 2)) {
+    for (const query of queries.slice(0, 3)) {
       try {
-        const url = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query + ' site:' + site)}&api_key=${SERP_KEY}&num=5&tbs=qdr:d`;
-        const res = await axios.get(url, { timeout: 10000 });
+        // Remove date filter so we get more results
+        const url = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query + ' site:' + site)}&api_key=${SERP_KEY}&num=5`;
+        const res = await axios.get(url, { timeout: 15000 });
         const results = res.data.organic_results || [];
+        console.log(`${site} - ${query}: ${results.length} results`);
+
         for (const result of results) {
           if (seenJobUrls.has(result.link)) continue;
           seenJobUrls.add(result.link);
-          const jobText = `${result.title}\n\nVacancy: ${result.title}\nRequirements: See full listing\nApply now at: ${result.link}\n\n${result.snippet || ''}\n\nClosing date: See listing\nSource: ${site}`;
-          const job = {
-            id: result.link,
-            body: jobText,
-            from: site,
-            source: site,
-            link: result.link,
-            time: new Date().toISOString(),
-            chatName: site,
-            notified: false
-          };
-          scrapedJobs.unshift(job);
-          if (scrapedJobs.length > 500) scrapedJobs.pop();
-          await processNewJob(job);
-          await new Promise(r => setTimeout(r, 1000));
+
+          const jobText = `${result.title}\n\nVacancy: ${result.title}\nApply now: ${result.link}\n\n${result.snippet || ''}\n\nRequirements: See full listing\nClosing date: See listing\nSource: ${site}`;
+
+          if (isJobPost(jobText)) {
+            const job = {
+              id: result.link,
+              body: jobText,
+              from: site,
+              source: site,
+              link: result.link,
+              time: new Date().toISOString(),
+              chatName: site,
+              notified: false
+            };
+            scrapedJobs.unshift(job);
+            if (scrapedJobs.length > 500) scrapedJobs.pop();
+            await processNewJob(job);
+            await new Promise(r => setTimeout(r, 1500));
+          }
         }
       } catch(e) {
         console.log(`Scrape error for ${site}:`, e.message);
       }
     }
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise(r => setTimeout(r, 1000));
   }
-  console.log(`Scraping done. Total scraped jobs: ${scrapedJobs.length}`);
+  console.log(`Scraping done. Total scraped: ${scrapedJobs.length}`);
 }
 
 function addJobMessage(msg, chatName) {
@@ -337,25 +362,35 @@ function addJobMessage(msg, chatName) {
   if (seenMessageIds.has(id)) return;
   seenMessageIds.add(id);
   if (jobMessages.find(j => j.id === id)) return;
+
+  // Only process messages from Jobs 2026 group
+  if (!chatName || !chatName.includes(TARGET_GROUP)) return;
+
+  // Skip own messages
   if (msg.from === `${MY_PHONE}@c.us`) return;
-  if (!msg.body || msg.body.length < 100) return;
-  if (!isJobMessage(msg.body)) return;
+
+  if (!msg.body || msg.body.length < 30) return;
+  if (!isJobPost(msg.body)) {
+    console.log(`Message from ${chatName} — not a relevant job, skipping`);
+    return;
+  }
 
   const job = {
     id,
     body: msg.body,
     from: msg.from,
     time: new Date(msg.timestamp * 1000).toISOString(),
-    chatName: chatName || msg._data?.notifyName || msg.from,
+    chatName: chatName,
     notified: false
   };
   jobMessages.unshift(job);
   if (jobMessages.length > 200) jobMessages.pop();
-  console.log(`✅ Job detected from: ${job.chatName}`);
+  console.log(`✅ Relevant job detected in ${chatName}!`);
   if (isReady) processNewJob(job);
 }
 
 client.on('message', async (msg) => {
+  // Handle APPROVE/DECLINE from Timothy
   if (msg.from === `${MY_PHONE}@c.us`) {
     const text = msg.body.trim().toUpperCase();
 
@@ -384,7 +419,7 @@ client.on('message', async (msg) => {
     } else if (text.startsWith('APPROVE_')) {
       const appId = text.replace('APPROVE_', '');
       const success = await sendApplication(appId);
-      await msg.reply(success ? '✅ Sent!' : '❌ Not found or already processed.');
+      await msg.reply(success ? '✅ Sent!' : '❌ Not found.');
 
     } else if (text.startsWith('SKIP_')) {
       const appId = text.replace('SKIP_', '');
@@ -396,12 +431,16 @@ client.on('message', async (msg) => {
     return;
   }
 
-  if (!msg.body || msg.body.length < 100) return;
+  // Only process messages from Jobs 2026 group
+  if (!msg.body || msg.body.length < 30) return;
   try {
     const chat = await msg.getChat();
-    addJobMessage(msg, chat.name);
+    if (chat.name === TARGET_GROUP) {
+      console.log(`New message in ${TARGET_GROUP} — checking if job...`);
+      addJobMessage(msg, chat.name);
+    }
   } catch(e) {
-    addJobMessage(msg, msg.from);
+    console.log('Message error:', e.message);
   }
 });
 
@@ -412,26 +451,34 @@ client.on('qr', async (qr) => {
 
 client.on('ready', async () => {
   isReady = true;
-  console.log('WhatsApp connected! Scanning chats for real job posts...');
+  console.log('WhatsApp connected! Looking for Jobs 2026 group...');
   try {
     const chats = await client.getChats();
-    console.log(`Found ${chats.length} chats/channels`);
-    for (const chat of chats) {
+    console.log(`Found ${chats.length} total chats`);
+
+    const jobsGroup = chats.find(c => c.name === TARGET_GROUP);
+    if (jobsGroup) {
+      console.log(`✅ Found group: ${TARGET_GROUP} — loading history...`);
       try {
-        const messages = await chat.fetchMessages({ limit: 100 });
+        const messages = await jobsGroup.fetchMessages({ limit: 200 });
+        console.log(`Scanning ${messages.length} messages from ${TARGET_GROUP}...`);
         for (const msg of messages) {
-          if (msg.body && msg.body.length > 100) {
-            addJobMessage(msg, chat.name);
+          if (msg.body && msg.body.length > 30) {
+            addJobMessage(msg, jobsGroup.name);
           }
         }
+        console.log(`Done. Found ${jobMessages.length} relevant jobs from group history.`);
       } catch(e) {
-        console.log(`Skipped: ${chat.name}`);
+        console.log('Error loading group history:', e.message);
       }
+    } else {
+      console.log(`❌ Group "${TARGET_GROUP}" not found! Available groups:`);
+      chats.filter(c => c.isGroup).forEach(c => console.log(' -', c.name));
     }
-    console.log(`Scan done. Found ${jobMessages.length} real job messages.`);
   } catch(e) {
-    console.log('History error:', e.message);
+    console.log('Error finding group:', e.message);
   }
+
   await scrapeJobSites();
   setInterval(scrapeJobSites, 6 * 60 * 60 * 1000);
 });
@@ -468,6 +515,7 @@ app.get('/test-email', async (req, res) => {
 app.get('/status', (req, res) => {
   res.json({
     ready: isReady,
+    watchingGroup: TARGET_GROUP,
     whatsappJobs: jobMessages.length,
     scrapedJobs: scrapedJobs.length,
     pending: Object.keys(pendingApplications).length
@@ -486,11 +534,14 @@ app.get('/qr', (req, res) => {
   if (isReady) {
     res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:40px;background:#f0f0f0;">
       <h1 style="color:green;">✅ WhatsApp Connected!</h1>
+      <p>👀 Watching group: <strong>${TARGET_GROUP}</strong></p>
       <p>WhatsApp jobs: ${jobMessages.length} | Scraped jobs: ${scrapedJobs.length} | Pending: ${Object.keys(pendingApplications).length}</p>
       <br>
       <a href="/scrape-now" style="background:#25D366;color:white;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:bold;">🔄 Scrape Now</a>
       &nbsp;
       <a href="/test-email" style="background:#4285f4;color:white;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:bold;">📧 Test Email</a>
+      &nbsp;
+      <a href="/status" style="background:#ff9800;color:white;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:bold;">📊 Status</a>
       </body></html>`);
   } else if (qrCodeData) {
     res.send(`<html><head><meta http-equiv="refresh" content="30"></head>
