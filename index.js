@@ -56,12 +56,19 @@ const JOB_SITES = [
   'jobboard.co.zw', 'cvpeopleafrica.com', 'prostaff.co.zw'
 ];
 
-const JOB_KEYWORDS = [
-  'vacancy', 'hiring', 'job', 'opportunity', 'apply',
-  'position', 'recruitment', 'career', 'CV', 'resume',
-  'procurement', 'operations', 'logistics', 'supply chain',
-  'manager', 'officer', 'coordinator', 'administrator',
-  'wanted', 'urgent', 'salary', 'experience', 'qualification'
+// STRICT job keywords - must match multiple to qualify
+const JOB_TRIGGER_KEYWORDS = [
+  'vacancy', 'vacancies', 'hiring', 'we are hiring', 'now hiring',
+  'job opportunity', 'job opening', 'employment opportunity',
+  'applications invited', 'applications are invited',
+  'apply now', 'apply before', 'apply by',
+  'recruitment', 'recruiter', 'we are recruiting',
+  'position available', 'post available', 'role available',
+  'job title', 'requirements:', 'qualifications required',
+  'minimum qualifications', 'key responsibilities',
+  'send cv', 'send your cv', 'email cv', 'submit cv',
+  'closing date', 'deadline for applications',
+  'salary:', 'remuneration:', 'package offered'
 ];
 
 let qrCodeData = null;
@@ -70,6 +77,7 @@ const jobMessages = [];
 const scrapedJobs = [];
 const pendingApplications = {};
 const seenJobUrls = new Set();
+const seenMessageIds = new Set();
 
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -100,13 +108,29 @@ function getAttachments() {
     const p = path.join(__dirname, f.file);
     if (fs.existsSync(p)) attachments.push({ filename: f.name, path: p });
   }
-  console.log('Attachments:', attachments.map(a => a.filename));
   return attachments;
 }
 
 function isJobMessage(text) {
+  if (!text || text.length < 50) return false;
+  
+  // Block own JobHunter AI messages to prevent infinite loop
+  if (text.includes('JobHunter AI') || text.includes('APPROVE_') || text.includes('SKIP_')) return false;
+  
+  // Block messages that are clearly personal conversations
+  if (text.length < 100) return false;
+
   const lower = text.toLowerCase();
-  return JOB_KEYWORDS.some(k => lower.includes(k));
+  
+  // Must match at least 2 strict job keywords to qualify
+  let matches = 0;
+  for (const keyword of JOB_TRIGGER_KEYWORDS) {
+    if (lower.includes(keyword.toLowerCase())) {
+      matches++;
+    }
+  }
+  
+  return matches >= 2;
 }
 
 function extractJobContact(jobText) {
@@ -157,7 +181,7 @@ Make it specific to the job requirements. Do not use placeholders.`
 async function processNewJob(job) {
   if (job.notified) return;
   job.notified = true;
-  console.log('Processing job:', job.chatName || job.source);
+  console.log('✅ Real job found from:', job.chatName || job.source);
 
   const coverLetter = await generateCoverLetter(job.body);
   const contact = extractJobContact(job.body);
@@ -283,8 +307,7 @@ async function scrapeJobSites() {
     'operations manager Zimbabwe jobs',
     'logistics coordinator Zimbabwe jobs',
     'supply chain Zimbabwe jobs',
-    'administrator Zimbabwe jobs',
-    'Zimbabwe jobs 2026'
+    'administrator Zimbabwe jobs'
   ];
 
   for (const site of JOB_SITES) {
@@ -296,23 +319,21 @@ async function scrapeJobSites() {
         for (const result of results) {
           if (seenJobUrls.has(result.link)) continue;
           seenJobUrls.add(result.link);
-          const jobText = `${result.title}\n\n${result.snippet || ''}\n\nSource: ${site}\nLink: ${result.link}`;
-          if (isJobMessage(jobText)) {
-            const job = {
-              id: result.link,
-              body: jobText,
-              from: site,
-              source: site,
-              link: result.link,
-              time: new Date().toISOString(),
-              chatName: site,
-              notified: false
-            };
-            scrapedJobs.unshift(job);
-            if (scrapedJobs.length > 500) scrapedJobs.pop();
-            await processNewJob(job);
-            await new Promise(r => setTimeout(r, 1000));
-          }
+          const jobText = `${result.title}\n\nVacancy: ${result.title}\nRequirements: See full listing\nApply now at: ${result.link}\n\n${result.snippet || ''}\n\nClosing date: See listing\nSource: ${site}`;
+          const job = {
+            id: result.link,
+            body: jobText,
+            from: site,
+            source: site,
+            link: result.link,
+            time: new Date().toISOString(),
+            chatName: site,
+            notified: false
+          };
+          scrapedJobs.unshift(job);
+          if (scrapedJobs.length > 500) scrapedJobs.pop();
+          await processNewJob(job);
+          await new Promise(r => setTimeout(r, 1000));
         }
       } catch(e) {
         console.log(`Scrape error for ${site}:`, e.message);
@@ -325,8 +346,22 @@ async function scrapeJobSites() {
 
 function addJobMessage(msg, chatName) {
   const id = msg.id._serialized || msg.id;
+  
+  // Skip if already seen
+  if (seenMessageIds.has(id)) return;
+  seenMessageIds.add(id);
+  
   if (jobMessages.find(j => j.id === id)) return;
-  if (!msg.body || !isJobMessage(msg.body)) return;
+  
+  // Skip messages FROM yourself
+  if (msg.from === `${MY_PHONE}@c.us`) return;
+  
+  // Skip very short messages
+  if (!msg.body || msg.body.length < 50) return;
+  
+  // Use strict job detection
+  if (!isJobMessage(msg.body)) return;
+
   const job = {
     id,
     body: msg.body,
@@ -337,10 +372,12 @@ function addJobMessage(msg, chatName) {
   };
   jobMessages.unshift(job);
   if (jobMessages.length > 200) jobMessages.pop();
+  console.log(`✅ Job detected from: ${job.chatName}`);
   if (isReady) processNewJob(job);
 }
 
 client.on('message', async (msg) => {
+  // Handle APPROVE/SKIP commands from yourself
   if (msg.from === `${MY_PHONE}@c.us`) {
     const text = msg.body.trim().toUpperCase();
     if (text.startsWith('APPROVE_')) {
@@ -354,9 +391,10 @@ client.on('message', async (msg) => {
         await msg.reply('⏭️ Job skipped.');
       }
     }
-    return;
+    return; // Always ignore own messages for job detection
   }
-  if (!msg.body || msg.body.length < 10) return;
+
+  if (!msg.body || msg.body.length < 50) return;
   try {
     const chat = await msg.getChat();
     addJobMessage(msg, chat.name);
@@ -372,26 +410,23 @@ client.on('qr', async (qr) => {
 
 client.on('ready', async () => {
   isReady = true;
-  console.log('WhatsApp connected! Scanning all chats including channels...');
+  console.log('WhatsApp connected! Scanning chats for real job posts...');
   try {
     const chats = await client.getChats();
     console.log(`Found ${chats.length} chats/channels`);
     for (const chat of chats) {
       try {
         const messages = await chat.fetchMessages({ limit: 100 });
-        let found = 0;
         for (const msg of messages) {
-          if (msg.body && msg.body.length > 20) {
+          if (msg.body && msg.body.length > 50) {
             addJobMessage(msg, chat.name);
-            found++;
           }
         }
-        if (found > 0) console.log(`${chat.name}: ${found} messages scanned`);
       } catch(e) {
         console.log(`Skipped: ${chat.name}`);
       }
     }
-    console.log(`WhatsApp scan done. Found ${jobMessages.length} job messages.`);
+    console.log(`Scan done. Found ${jobMessages.length} real job messages.`);
   } catch(e) {
     console.log('History error:', e.message);
   }
@@ -420,7 +455,7 @@ app.get('/test-email', async (req, res) => {
       from: GMAIL_USER,
       to: MY_EMAIL,
       subject: '✅ JobHunter Test Email',
-      html: `<h2>JobHunter AI is working!</h2><p>Your email notifications are set up correctly.</p><p>Gmail: ${GMAIL_USER}</p>`
+      html: `<h2>JobHunter AI is working!</h2><p>Email notifications are set up correctly.</p>`
     });
     res.json({ success: true, message: 'Test email sent to ' + MY_EMAIL });
   } catch(e) {
@@ -431,7 +466,6 @@ app.get('/test-email', async (req, res) => {
 app.get('/status', (req, res) => {
   res.json({
     ready: isReady,
-    qr: qrCodeData,
     whatsappJobs: jobMessages.length,
     scrapedJobs: scrapedJobs.length,
     pending: Object.keys(pendingApplications).length
@@ -450,7 +484,8 @@ app.get('/qr', (req, res) => {
     res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:40px;background:#f0f0f0;">
       <h1 style="color:green;">✅ WhatsApp Connected!</h1>
       <p>WhatsApp jobs: ${jobMessages.length} | Scraped jobs: ${scrapedJobs.length} | Pending: ${Object.keys(pendingApplications).length}</p>
-      <br><a href="/scrape-now" style="background:#25D366;color:white;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:bold;">🔄 Scrape Now</a>
+      <br>
+      <a href="/scrape-now" style="background:#25D366;color:white;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:bold;">🔄 Scrape Now</a>
       &nbsp;
       <a href="/test-email" style="background:#4285f4;color:white;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:bold;">📧 Test Email</a>
       </body></html>`);
