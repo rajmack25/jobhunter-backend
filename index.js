@@ -82,7 +82,7 @@ try {
 } catch(e) {}
 
 const client = new Client({
-  authStrategy: new LocalAuth(),
+  authStrategy: new LocalAuth({ dataPath: '/app/.wwebjs_auth' }),
   puppeteer: {
     args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--no-first-run','--no-zygote','--single-process'],
     executablePath: chromiumPath || undefined
@@ -274,7 +274,6 @@ async function sendApplication(appId) {
   return true;
 }
 
-// ── SCRAPE JOB SITES VIA SERPAPI ──
 async function scrapeJobSites() {
   if (!SERP_KEY) { console.log('No SERP key'); return; }
   console.log('Scraping job sites...');
@@ -294,13 +293,10 @@ async function scrapeJobSites() {
         const url = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query + ' site:' + site)}&api_key=${SERP_KEY}&num=5&tbs=qdr:d`;
         const res = await axios.get(url, { timeout: 10000 });
         const results = res.data.organic_results || [];
-
         for (const result of results) {
           if (seenJobUrls.has(result.link)) continue;
           seenJobUrls.add(result.link);
-
           const jobText = `${result.title}\n\n${result.snippet || ''}\n\nSource: ${site}\nLink: ${result.link}`;
-
           if (isJobMessage(jobText)) {
             const job = {
               id: result.link,
@@ -327,12 +323,10 @@ async function scrapeJobSites() {
   console.log(`Scraping done. Total scraped jobs: ${scrapedJobs.length}`);
 }
 
-// ── WHATSAPP CHANNEL + GROUP HISTORY ──
 function addJobMessage(msg, chatName) {
   const id = msg.id._serialized || msg.id;
   if (jobMessages.find(j => j.id === id)) return;
   if (!msg.body || !isJobMessage(msg.body)) return;
-
   const job = {
     id,
     body: msg.body,
@@ -379,14 +373,11 @@ client.on('qr', async (qr) => {
 client.on('ready', async () => {
   isReady = true;
   console.log('WhatsApp connected! Scanning all chats including channels...');
-
   try {
     const chats = await client.getChats();
     console.log(`Found ${chats.length} chats/channels`);
-
     for (const chat of chats) {
       try {
-        // This catches both groups AND channels
         const messages = await chat.fetchMessages({ limit: 100 });
         let found = 0;
         for (const msg of messages) {
@@ -400,4 +391,83 @@ client.on('ready', async () => {
         console.log(`Skipped: ${chat.name}`);
       }
     }
-    console.log(`WhatsApp scan done. Found ${job
+    console.log(`WhatsApp scan done. Found ${jobMessages.length} job messages.`);
+  } catch(e) {
+    console.log('History error:', e.message);
+  }
+  await scrapeJobSites();
+  setInterval(scrapeJobSites, 6 * 60 * 60 * 1000);
+});
+
+app.get('/approve/:appId', async (req, res) => {
+  const success = await sendApplication(req.params.appId);
+  res.send(`<html><body style="font-family:Arial;text-align:center;padding:50px;">
+    ${success
+      ? '<h1 style="color:green;">✅ Application Sent!</h1><p>CV, Cover Letter & Certificates delivered.</p>'
+      : '<h1 style="color:red;">❌ Already Processed</h1>'}
+    </body></html>`);
+});
+
+app.get('/skip/:appId', (req, res) => {
+  if (pendingApplications[req.params.appId]) pendingApplications[req.params.appId].status = 'skipped';
+  res.send(`<html><body style="font-family:Arial;text-align:center;padding:50px;">
+    <h1 style="color:orange;">⏭️ Job Skipped</h1></body></html>`);
+});
+
+app.get('/test-email', async (req, res) => {
+  try {
+    await transporter.sendMail({
+      from: GMAIL_USER,
+      to: MY_EMAIL,
+      subject: '✅ JobHunter Test Email',
+      html: `<h2>JobHunter AI is working!</h2><p>Your email notifications are set up correctly.</p><p>Gmail: ${GMAIL_USER}</p>`
+    });
+    res.json({ success: true, message: 'Test email sent to ' + MY_EMAIL });
+  } catch(e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.get('/status', (req, res) => {
+  res.json({
+    ready: isReady,
+    qr: qrCodeData,
+    whatsappJobs: jobMessages.length,
+    scrapedJobs: scrapedJobs.length,
+    pending: Object.keys(pendingApplications).length
+  });
+});
+
+app.get('/jobs', (req, res) => res.json([...jobMessages, ...scrapedJobs]));
+app.get('/pending', (req, res) => res.json(pendingApplications));
+app.get('/scrape-now', async (req, res) => {
+  res.json({ message: 'Scraping started...' });
+  await scrapeJobSites();
+});
+
+app.get('/qr', (req, res) => {
+  if (isReady) {
+    res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:40px;background:#f0f0f0;">
+      <h1 style="color:green;">✅ WhatsApp Connected!</h1>
+      <p>WhatsApp jobs: ${jobMessages.length} | Scraped jobs: ${scrapedJobs.length} | Pending: ${Object.keys(pendingApplications).length}</p>
+      <br><a href="/scrape-now" style="background:#25D366;color:white;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:bold;">🔄 Scrape Now</a>
+      &nbsp;
+      <a href="/test-email" style="background:#4285f4;color:white;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:bold;">📧 Test Email</a>
+      </body></html>`);
+  } else if (qrCodeData) {
+    res.send(`<html><head><meta http-equiv="refresh" content="30"></head>
+      <body style="font-family:sans-serif;text-align:center;padding:40px;background:#f0f0f0;">
+      <h1>📱 Scan with WhatsApp</h1>
+      <p>Open WhatsApp → Three dots → Linked Devices → Link a Device</p>
+      <img src="${qrCodeData}" style="width:300px;height:300px;border:4px solid #25D366;border-radius:12px;"/>
+      <p style="color:gray;font-size:14px;">Page auto-refreshes every 30 seconds</p>
+      </body></html>`);
+  } else {
+    res.send(`<html><head><meta http-equiv="refresh" content="3"></head>
+      <body style="text-align:center;padding:40px;"><h1>⏳ Loading...</h1></body></html>`);
+  }
+});
+
+client.initialize();
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
