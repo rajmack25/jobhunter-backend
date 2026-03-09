@@ -56,7 +56,6 @@ const JOB_SITES = [
   'jobboard.co.zw', 'cvpeopleafrica.com', 'prostaff.co.zw'
 ];
 
-// STRICT job keywords - must match multiple to qualify
 const JOB_TRIGGER_KEYWORDS = [
   'vacancy', 'vacancies', 'hiring', 'we are hiring', 'now hiring',
   'job opportunity', 'job opening', 'employment opportunity',
@@ -112,24 +111,13 @@ function getAttachments() {
 }
 
 function isJobMessage(text) {
-  if (!text || text.length < 50) return false;
-  
-  // Block own JobHunter AI messages to prevent infinite loop
+  if (!text || text.length < 100) return false;
   if (text.includes('JobHunter AI') || text.includes('APPROVE_') || text.includes('SKIP_')) return false;
-  
-  // Block messages that are clearly personal conversations
-  if (text.length < 100) return false;
-
   const lower = text.toLowerCase();
-  
-  // Must match at least 2 strict job keywords to qualify
   let matches = 0;
   for (const keyword of JOB_TRIGGER_KEYWORDS) {
-    if (lower.includes(keyword.toLowerCase())) {
-      matches++;
-    }
+    if (lower.includes(keyword.toLowerCase())) matches++;
   }
-  
   return matches >= 2;
 }
 
@@ -207,8 +195,8 @@ ${preview}${job.body.length > 300 ? '...' : ''}
 ${coverLetter ? coverLetter.slice(0, 200) + '...' : 'Could not generate'}
 
 ---
-Reply *APPROVE_${appId}* to send
-Reply *SKIP_${appId}* to ignore`;
+Reply *APPROVE* to send application
+Reply *DECLINE* to skip this job`;
 
   try {
     await client.sendMessage(`${MY_PHONE}@c.us`, approveMsg);
@@ -243,7 +231,7 @@ Reply *SKIP_${appId}* to ignore`;
               ❌ SKIP
             </a>
           </div>
-          <p style="color:#999;font-size:12px;margin-top:20px;">Or reply APPROVE_${appId} / SKIP_${appId} on WhatsApp</p>
+          <p style="color:#999;font-size:12px;margin-top:20px;">Or reply APPROVE / DECLINE on WhatsApp</p>
         </div>`
     });
     console.log('Email notification sent');
@@ -346,20 +334,11 @@ async function scrapeJobSites() {
 
 function addJobMessage(msg, chatName) {
   const id = msg.id._serialized || msg.id;
-  
-  // Skip if already seen
   if (seenMessageIds.has(id)) return;
   seenMessageIds.add(id);
-  
   if (jobMessages.find(j => j.id === id)) return;
-  
-  // Skip messages FROM yourself
   if (msg.from === `${MY_PHONE}@c.us`) return;
-  
-  // Skip very short messages
-  if (!msg.body || msg.body.length < 50) return;
-  
-  // Use strict job detection
+  if (!msg.body || msg.body.length < 100) return;
   if (!isJobMessage(msg.body)) return;
 
   const job = {
@@ -377,24 +356,47 @@ function addJobMessage(msg, chatName) {
 }
 
 client.on('message', async (msg) => {
-  // Handle APPROVE/SKIP commands from yourself
   if (msg.from === `${MY_PHONE}@c.us`) {
     const text = msg.body.trim().toUpperCase();
-    if (text.startsWith('APPROVE_')) {
+
+    if (text === 'APPROVE' || text === 'YES' || text === 'SEND') {
+      const pendingId = Object.keys(pendingApplications)
+        .reverse()
+        .find(id => pendingApplications[id].status === 'pending');
+      if (pendingId) {
+        const success = await sendApplication(pendingId);
+        await msg.reply(success ? '✅ Application sent with CV, Cover Letter & Certificates!' : '❌ Failed to send.');
+      } else {
+        await msg.reply('❌ No pending applications found.');
+      }
+
+    } else if (text === 'DECLINE' || text === 'SKIP' || text === 'NO') {
+      const pendingId = Object.keys(pendingApplications)
+        .reverse()
+        .find(id => pendingApplications[id].status === 'pending');
+      if (pendingId) {
+        pendingApplications[pendingId].status = 'skipped';
+        await msg.reply('⏭️ Job skipped. Reply APPROVE or DECLINE for the next one.');
+      } else {
+        await msg.reply('❌ No pending applications found.');
+      }
+
+    } else if (text.startsWith('APPROVE_')) {
       const appId = text.replace('APPROVE_', '');
       const success = await sendApplication(appId);
-      await msg.reply(success ? '✅ Application sent with CV, Cover Letter & Certificates!' : '❌ Not found or already processed.');
+      await msg.reply(success ? '✅ Sent!' : '❌ Not found or already processed.');
+
     } else if (text.startsWith('SKIP_')) {
       const appId = text.replace('SKIP_', '');
       if (pendingApplications[appId]) {
         pendingApplications[appId].status = 'skipped';
-        await msg.reply('⏭️ Job skipped.');
+        await msg.reply('⏭️ Skipped.');
       }
     }
-    return; // Always ignore own messages for job detection
+    return;
   }
 
-  if (!msg.body || msg.body.length < 50) return;
+  if (!msg.body || msg.body.length < 100) return;
   try {
     const chat = await msg.getChat();
     addJobMessage(msg, chat.name);
@@ -418,7 +420,7 @@ client.on('ready', async () => {
       try {
         const messages = await chat.fetchMessages({ limit: 100 });
         for (const msg of messages) {
-          if (msg.body && msg.body.length > 50) {
+          if (msg.body && msg.body.length > 100) {
             addJobMessage(msg, chat.name);
           }
         }
@@ -474,6 +476,7 @@ app.get('/status', (req, res) => {
 
 app.get('/jobs', (req, res) => res.json([...jobMessages, ...scrapedJobs]));
 app.get('/pending', (req, res) => res.json(pendingApplications));
+
 app.get('/scrape-now', async (req, res) => {
   res.json({ message: 'Scraping started...' });
   await scrapeJobSites();
