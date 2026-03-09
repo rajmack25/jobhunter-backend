@@ -2,6 +2,7 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const cors = require('cors');
 const qrcode = require('qrcode');
+const { execSync } = require('child_process');
 
 const app = express();
 app.use(cors());
@@ -18,6 +19,14 @@ let qrCodeData = null;
 let isReady = false;
 const jobMessages = [];
 
+let chromiumPath = '';
+try {
+  chromiumPath = execSync('which chromium || which chromium-browser || which google-chrome || find /nix -name "chromium" 2>/dev/null | head -1').toString().trim();
+  console.log('Found chromium at:', chromiumPath);
+} catch(e) {
+  console.log('Chromium search error:', e.message);
+}
+
 const client = new Client({
   authStrategy: new LocalAuth(),
   puppeteer: {
@@ -30,7 +39,7 @@ const client = new Client({
       '--no-zygote',
       '--single-process'
     ],
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
+    executablePath: chromiumPath || undefined
   }
 });
 
