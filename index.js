@@ -6,6 +6,7 @@ const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const axios = require('axios');
 
 const app = express();
 app.use(cors());
@@ -16,6 +17,7 @@ const GMAIL_PASS = process.env.GMAIL_PASS;
 const MY_PHONE = process.env.MY_PHONE;
 const MY_EMAIL = process.env.MY_EMAIL;
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+const SERP_KEY = process.env.SERP_API_KEY;
 
 const CV_SUMMARY = `
 Timothy Jaravani - Procurement & Operations Professional
@@ -46,6 +48,14 @@ Supply Chain Operations, Operational Efficiency, Advanced Excel, ERP Systems (Sa
 Microsoft Office, Stakeholder Communication, Team Coordination
 `;
 
+const JOB_SITES = [
+  'vacancymail.co.zw', 'classifieds.co.zw', 'zimbabwejobs.co.zw',
+  'alljobszw.com', 'ihararejobs.com', 'careers.co.zw',
+  'jobszimbabwe.net', 'applynow.co.zw', 'zimngojobs.co.zw',
+  'linkedin.com/jobs', 'reliefweb.int/jobs', 'ngojobszimbabwe.com',
+  'jobboard.co.zw', 'cvpeopleafrica.com', 'prostaff.co.zw'
+];
+
 const JOB_KEYWORDS = [
   'vacancy', 'hiring', 'job', 'opportunity', 'apply',
   'position', 'recruitment', 'career', 'CV', 'resume',
@@ -57,7 +67,9 @@ const JOB_KEYWORDS = [
 let qrCodeData = null;
 let isReady = false;
 const jobMessages = [];
+const scrapedJobs = [];
 const pendingApplications = {};
+const seenJobUrls = new Set();
 
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -79,13 +91,16 @@ const client = new Client({
 
 function getAttachments() {
   const attachments = [];
-  const cvPath = path.join(__dirname, 'cv.pdf');
-  const clPath = path.join(__dirname, 'coverletter.docx');
-  const certPath = path.join(__dirname, 'certificates.pdf');
-  if (fs.existsSync(cvPath)) attachments.push({ filename: 'Timothy_Jaravani_CV.pdf', path: cvPath });
-  if (fs.existsSync(clPath)) attachments.push({ filename: 'Timothy_Jaravani_Cover_Letter.docx', path: clPath });
-  if (fs.existsSync(certPath)) attachments.push({ filename: 'Timothy_Jaravani_Certificates.pdf', path: certPath });
-  console.log('Attachments found:', attachments.map(a => a.filename));
+  const files = [
+    { name: 'Timothy_Jaravani_CV.pdf', file: 'cv.pdf' },
+    { name: 'Timothy_Jaravani_Cover_Letter.docx', file: 'coverletter.docx' },
+    { name: 'Timothy_Jaravani_Certificates.pdf', file: 'certificates.pdf' }
+  ];
+  for (const f of files) {
+    const p = path.join(__dirname, f.file);
+    if (fs.existsSync(p)) attachments.push({ filename: f.name, path: p });
+  }
+  console.log('Attachments:', attachments.map(a => a.filename));
   return attachments;
 }
 
@@ -94,24 +109,13 @@ function isJobMessage(text) {
   return JOB_KEYWORDS.some(k => lower.includes(k));
 }
 
-function addJobMessage(msg, chatName) {
-  const id = msg.id._serialized || msg.id;
-  if (jobMessages.find(j => j.id === id)) return;
-  if (isJobMessage(msg.body)) {
-    const job = {
-      id,
-      body: msg.body,
-      from: msg.from,
-      time: new Date(msg.timestamp * 1000).toISOString(),
-      chatName: chatName || msg._data?.notifyName || msg.from,
-      notified: false
-    };
-    jobMessages.unshift(job);
-    if (jobMessages.length > 200) jobMessages.pop();
-    if (isReady && !msg._data?.isForwarded) {
-      processNewJob(job);
-    }
-  }
+function extractJobContact(jobText) {
+  const emailMatch = jobText.match(/[\w.-]+@[\w.-]+\.\w+/);
+  const phoneMatch = jobText.match(/(\+?2637\d{8}|07\d{8}|\+27\d{9})/);
+  return {
+    email: emailMatch ? emailMatch[0] : null,
+    phone: phoneMatch ? phoneMatch[0] : null
+  };
 }
 
 async function generateCoverLetter(jobText) {
@@ -145,24 +149,15 @@ Make it specific to the job requirements. Do not use placeholders.`
     const data = await response.json();
     return data.content?.[0]?.text || null;
   } catch(e) {
-    console.log('Cover letter generation error:', e.message);
+    console.log('Cover letter error:', e.message);
     return null;
   }
-}
-
-function extractJobContact(jobText) {
-  const emailMatch = jobText.match(/[\w.-]+@[\w.-]+\.\w+/);
-  const phoneMatch = jobText.match(/(\+?2637\d{8}|07\d{8}|\+27\d{9})/);
-  return {
-    email: emailMatch ? emailMatch[0] : null,
-    phone: phoneMatch ? phoneMatch[0] : null
-  };
 }
 
 async function processNewJob(job) {
   if (job.notified) return;
   job.notified = true;
-  console.log('Processing new job:', job.chatName);
+  console.log('Processing job:', job.chatName || job.source);
 
   const coverLetter = await generateCoverLetter(job.body);
   const contact = extractJobContact(job.body);
@@ -171,41 +166,43 @@ async function processNewJob(job) {
   pendingApplications[appId] = { job, coverLetter, contact, status: 'pending' };
 
   const preview = job.body.slice(0, 300);
-  const approveMsg = `
-🤖 *JobHunter AI — New Job Found!*
+  const source = job.chatName || job.source || 'Unknown';
+  const link = job.link ? `\n🔗 *Link:* ${job.link}` : '';
 
-📋 *Source:* ${job.chatName}
+  const approveMsg = `🤖 *JobHunter AI — New Job Found!*
+
+📋 *Source:* ${source}${link}
 ⏰ *Time:* ${new Date(job.time).toLocaleString('en-ZW')}
 
 📝 *Job Preview:*
 ${preview}${job.body.length > 300 ? '...' : ''}
 
-✉️ *Contact found:* ${contact.email || contact.phone || 'None detected'}
+✉️ *Contact:* ${contact.email || contact.phone || 'None detected'}
 
 📄 *Cover Letter Preview:*
-${coverLetter ? coverLetter.slice(0, 200) + '...' : 'Could not generate cover letter'}
+${coverLetter ? coverLetter.slice(0, 200) + '...' : 'Could not generate'}
 
 ---
-Reply *APPROVE_${appId}* to send application
-Reply *SKIP_${appId}* to ignore this job
-`;
+Reply *APPROVE_${appId}* to send
+Reply *SKIP_${appId}* to ignore`;
 
   try {
     await client.sendMessage(`${MY_PHONE}@c.us`, approveMsg);
     console.log('WhatsApp notification sent');
   } catch(e) {
-    console.log('WhatsApp notify error:', e.message);
+    console.log('WA notify error:', e.message);
   }
 
   try {
     await transporter.sendMail({
       from: GMAIL_USER,
       to: MY_EMAIL,
-      subject: `🤖 JobHunter: New Job from ${job.chatName} — Approve?`,
+      subject: `🤖 JobHunter: New Job from ${source} — Approve?`,
       html: `
         <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
           <h2 style="color:#25D366;">🤖 JobHunter AI — New Job Found!</h2>
-          <p><strong>Source:</strong> ${job.chatName}</p>
+          <p><strong>Source:</strong> ${source}</p>
+          ${job.link ? `<p><strong>Link:</strong> <a href="${job.link}">${job.link}</a></p>` : ''}
           <p><strong>Time:</strong> ${new Date(job.time).toLocaleString('en-ZW')}</p>
           <p><strong>Contact:</strong> ${contact.email || contact.phone || 'None detected'}</p>
           <h3>Job Posting:</h3>
@@ -223,8 +220,7 @@ Reply *SKIP_${appId}* to ignore this job
             </a>
           </div>
           <p style="color:#999;font-size:12px;margin-top:20px;">Or reply APPROVE_${appId} / SKIP_${appId} on WhatsApp</p>
-        </div>
-      `
+        </div>`
     });
     console.log('Email notification sent');
   } catch(e) {
@@ -239,6 +235,7 @@ async function sendApplication(appId) {
 
   const { job, coverLetter, contact } = pendingApp;
   const attachments = getAttachments();
+  const source = job.chatName || job.source || 'Unknown';
 
   if (contact.email) {
     try {
@@ -260,21 +257,93 @@ async function sendApplication(appId) {
       const phone = contact.phone.replace(/\D/g,'').replace(/^0/,'263');
       const msg = coverLetter
         ? coverLetter + '\n\n_CV available on request. Contact: jaraztimothy@gmail.com_'
-        : `Dear Hiring Manager,\n\nI am Timothy Jaravani and I am interested in the advertised position. I have 3+ years experience in procurement and operations.\n\nPlease contact me:\nEmail: jaraztimothy@gmail.com\nPhone: +263 785 010 425`;
+        : `Dear Hiring Manager,\n\nI am Timothy Jaravani, interested in the advertised position. 3+ years in procurement and operations.\n\nEmail: jaraztimothy@gmail.com\nPhone: +263 785 010 425`;
       await client.sendMessage(`${phone}@c.us`, msg);
-      console.log('WhatsApp application sent to:', phone);
+      console.log('WA application sent to:', phone);
     } catch(e) {
-      console.log('WhatsApp application error:', e.message);
+      console.log('WA application error:', e.message);
     }
   }
 
   try {
     await client.sendMessage(`${MY_PHONE}@c.us`,
-      `✅ *Application Sent!*\n\nJob from: ${job.chatName}\n${contact.email ? '📧 Email sent to: ' + contact.email : ''}${contact.phone ? '\n📱 WhatsApp sent to: ' + contact.phone : ''}\n\n📎 Attachments sent: CV, Cover Letter, Certificates\n\nGood luck Timothy! 🤞`
+      `✅ *Application Sent!*\n\nJob from: ${source}\n${contact.email ? '📧 Email: ' + contact.email : ''}${contact.phone ? '\n📱 WhatsApp: ' + contact.phone : ''}\n📎 CV + Cover Letter + Certificates attached\n\nGood luck Timothy! 🤞`
     );
   } catch(e) {}
 
   return true;
+}
+
+// ── SCRAPE JOB SITES VIA SERPAPI ──
+async function scrapeJobSites() {
+  if (!SERP_KEY) { console.log('No SERP key'); return; }
+  console.log('Scraping job sites...');
+
+  const queries = [
+    'procurement manager Zimbabwe jobs',
+    'operations manager Zimbabwe jobs',
+    'logistics coordinator Zimbabwe jobs',
+    'supply chain Zimbabwe jobs',
+    'administrator Zimbabwe jobs',
+    'Zimbabwe jobs 2026'
+  ];
+
+  for (const site of JOB_SITES) {
+    for (const query of queries.slice(0, 2)) {
+      try {
+        const url = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query + ' site:' + site)}&api_key=${SERP_KEY}&num=5&tbs=qdr:d`;
+        const res = await axios.get(url, { timeout: 10000 });
+        const results = res.data.organic_results || [];
+
+        for (const result of results) {
+          if (seenJobUrls.has(result.link)) continue;
+          seenJobUrls.add(result.link);
+
+          const jobText = `${result.title}\n\n${result.snippet || ''}\n\nSource: ${site}\nLink: ${result.link}`;
+
+          if (isJobMessage(jobText)) {
+            const job = {
+              id: result.link,
+              body: jobText,
+              from: site,
+              source: site,
+              link: result.link,
+              time: new Date().toISOString(),
+              chatName: site,
+              notified: false
+            };
+            scrapedJobs.unshift(job);
+            if (scrapedJobs.length > 500) scrapedJobs.pop();
+            await processNewJob(job);
+            await new Promise(r => setTimeout(r, 1000));
+          }
+        }
+      } catch(e) {
+        console.log(`Scrape error for ${site}:`, e.message);
+      }
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  console.log(`Scraping done. Total scraped jobs: ${scrapedJobs.length}`);
+}
+
+// ── WHATSAPP CHANNEL + GROUP HISTORY ──
+function addJobMessage(msg, chatName) {
+  const id = msg.id._serialized || msg.id;
+  if (jobMessages.find(j => j.id === id)) return;
+  if (!msg.body || !isJobMessage(msg.body)) return;
+
+  const job = {
+    id,
+    body: msg.body,
+    from: msg.from,
+    time: new Date(msg.timestamp * 1000).toISOString(),
+    chatName: chatName || msg._data?.notifyName || msg.from,
+    notified: false
+  };
+  jobMessages.unshift(job);
+  if (jobMessages.length > 200) jobMessages.pop();
+  if (isReady) processNewJob(job);
 }
 
 client.on('message', async (msg) => {
@@ -283,7 +352,7 @@ client.on('message', async (msg) => {
     if (text.startsWith('APPROVE_')) {
       const appId = text.replace('APPROVE_', '');
       const success = await sendApplication(appId);
-      await msg.reply(success ? '✅ Application sent with CV, Cover Letter & Certificates!' : '❌ Application not found or already processed.');
+      await msg.reply(success ? '✅ Application sent with CV, Cover Letter & Certificates!' : '❌ Not found or already processed.');
     } else if (text.startsWith('SKIP_')) {
       const appId = text.replace('SKIP_', '');
       if (pendingApplications[appId]) {
@@ -293,7 +362,6 @@ client.on('message', async (msg) => {
     }
     return;
   }
-
   if (!msg.body || msg.body.length < 10) return;
   try {
     const chat = await msg.getChat();
@@ -305,73 +373,31 @@ client.on('message', async (msg) => {
 
 client.on('qr', async (qr) => {
   qrCodeData = await qrcode.toDataURL(qr);
-  console.log('QR Code ready');
+  console.log('QR ready');
 });
 
 client.on('ready', async () => {
   isReady = true;
-  console.log('WhatsApp connected! Loading history...');
+  console.log('WhatsApp connected! Scanning all chats including channels...');
+
   try {
     const chats = await client.getChats();
+    console.log(`Found ${chats.length} chats/channels`);
+
     for (const chat of chats) {
       try {
-        const messages = await chat.fetchMessages({ limit: 50 });
+        // This catches both groups AND channels
+        const messages = await chat.fetchMessages({ limit: 100 });
+        let found = 0;
         for (const msg of messages) {
           if (msg.body && msg.body.length > 20) {
             addJobMessage(msg, chat.name);
+            found++;
           }
         }
-      } catch(e) {}
+        if (found > 0) console.log(`${chat.name}: ${found} messages scanned`);
+      } catch(e) {
+        console.log(`Skipped: ${chat.name}`);
+      }
     }
-    console.log(`History loaded. Found ${jobMessages.length} job messages.`);
-  } catch(e) {
-    console.log('History error:', e.message);
-  }
-});
-
-app.get('/approve/:appId', async (req, res) => {
-  const success = await sendApplication(req.params.appId);
-  res.send(`<html><body style="font-family:Arial;text-align:center;padding:50px;">
-    ${success
-      ? '<h1 style="color:green;">✅ Application Sent!</h1><p>CV, Cover Letter & Certificates delivered successfully.</p>'
-      : '<h1 style="color:red;">❌ Already Processed</h1><p>This application was already sent or skipped.</p>'}
-    </body></html>`);
-});
-
-app.get('/skip/:appId', (req, res) => {
-  if (pendingApplications[req.params.appId]) {
-    pendingApplications[req.params.appId].status = 'skipped';
-  }
-  res.send(`<html><body style="font-family:Arial;text-align:center;padding:50px;">
-    <h1 style="color:orange;">⏭️ Job Skipped</h1><p>This job has been skipped.</p>
-    </body></html>`);
-});
-
-app.get('/status', (req, res) => {
-  res.json({ ready: isReady, qr: qrCodeData, jobCount: jobMessages.length });
-});
-
-app.get('/jobs', (req, res) => res.json(jobMessages));
-app.get('/pending', (req, res) => res.json(pendingApplications));
-
-app.get('/qr', (req, res) => {
-  if (isReady) {
-    res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:40px;background:#f0f0f0;">
-      <h1 style="color:green;">✅ WhatsApp Connected!</h1>
-      <p>Jobs found: ${jobMessages.length} | Pending: ${Object.keys(pendingApplications).length}</p>
-      </body></html>`);
-  } else if (qrCodeData) {
-    res.send(`<html><head><meta http-equiv="refresh" content="30"></head>
-      <body style="font-family:sans-serif;text-align:center;padding:40px;background:#f0f0f0;">
-      <h1>📱 Scan with WhatsApp</h1>
-      <img src="${qrCodeData}" style="width:300px;height:300px;border:4px solid #25D366;border-radius:12px;"/>
-      </body></html>`);
-  } else {
-    res.send(`<html><head><meta http-equiv="refresh" content="3"></head>
-      <body style="text-align:center;padding:40px;"><h1>⏳ Loading...</h1></body></html>`);
-  }
-});
-
-client.initialize();
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
+    console.log(`WhatsApp scan done. Found ${job
