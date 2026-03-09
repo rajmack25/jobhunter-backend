@@ -59,7 +59,6 @@ let isReady = false;
 const jobMessages = [];
 const pendingApplications = {};
 
-// Email transporter
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: { user: GMAIL_USER, pass: GMAIL_PASS }
@@ -77,6 +76,18 @@ const client = new Client({
     executablePath: chromiumPath || undefined
   }
 });
+
+function getAttachments() {
+  const attachments = [];
+  const cvPath = path.join(__dirname, 'cv.pdf');
+  const clPath = path.join(__dirname, 'coverletter.docx');
+  const certPath = path.join(__dirname, 'certificates.pdf');
+  if (fs.existsSync(cvPath)) attachments.push({ filename: 'Timothy_Jaravani_CV.pdf', path: cvPath });
+  if (fs.existsSync(clPath)) attachments.push({ filename: 'Timothy_Jaravani_Cover_Letter.docx', path: clPath });
+  if (fs.existsSync(certPath)) attachments.push({ filename: 'Timothy_Jaravani_Certificates.pdf', path: certPath });
+  console.log('Attachments found:', attachments.map(a => a.filename));
+  return attachments;
+}
 
 function isJobMessage(text) {
   const lower = text.toLowerCase();
@@ -97,7 +108,6 @@ function addJobMessage(msg, chatName) {
     };
     jobMessages.unshift(job);
     if (jobMessages.length > 200) jobMessages.pop();
-    // Notify for new real-time messages only
     if (isReady && !msg._data?.isForwarded) {
       processNewJob(job);
     }
@@ -118,15 +128,15 @@ async function generateCoverLetter(jobText) {
         max_tokens: 800,
         messages: [{
           role: 'user',
-          content: `Write a professional cover letter for Timothy Jaravani applying for this job. 
-          
+          content: `Write a professional cover letter for Timothy Jaravani applying for this job.
+
 Job posting:
 ${jobText}
 
 Timothy's background:
 ${CV_SUMMARY}
 
-Write a concise, professional cover letter (3 paragraphs max) tailored specifically to this job. 
+Write a concise, professional cover letter (3 paragraphs max) tailored specifically to this job.
 Start with "Dear Hiring Manager," and end with "Yours faithfully, Timothy Jaravani".
 Make it specific to the job requirements. Do not use placeholders.`
         }]
@@ -140,8 +150,7 @@ Make it specific to the job requirements. Do not use placeholders.`
   }
 }
 
-async function extractJobContact(jobText) {
-  // Extract email and phone from job text
+function extractJobContact(jobText) {
   const emailMatch = jobText.match(/[\w.-]+@[\w.-]+\.\w+/);
   const phoneMatch = jobText.match(/(\+?2637\d{8}|07\d{8}|\+27\d{9})/);
   return {
@@ -153,19 +162,13 @@ async function extractJobContact(jobText) {
 async function processNewJob(job) {
   if (job.notified) return;
   job.notified = true;
-
   console.log('Processing new job:', job.chatName);
 
   const coverLetter = await generateCoverLetter(job.body);
-  const contact = await extractJobContact(job.body);
+  const contact = extractJobContact(job.body);
 
   const appId = Date.now().toString();
-  pendingApplications[appId] = {
-    job,
-    coverLetter,
-    contact,
-    status: 'pending'
-  };
+  pendingApplications[appId] = { job, coverLetter, contact, status: 'pending' };
 
   const preview = job.body.slice(0, 300);
   const approveMsg = `
@@ -187,7 +190,6 @@ Reply *APPROVE_${appId}* to send application
 Reply *SKIP_${appId}* to ignore this job
 `;
 
-  // Send WhatsApp notification to yourself
   try {
     await client.sendMessage(`${MY_PHONE}@c.us`, approveMsg);
     console.log('WhatsApp notification sent');
@@ -195,7 +197,6 @@ Reply *SKIP_${appId}* to ignore this job
     console.log('WhatsApp notify error:', e.message);
   }
 
-  // Send email notification
   try {
     await transporter.sendMail({
       from: GMAIL_USER,
@@ -207,15 +208,12 @@ Reply *SKIP_${appId}* to ignore this job
           <p><strong>Source:</strong> ${job.chatName}</p>
           <p><strong>Time:</strong> ${new Date(job.time).toLocaleString('en-ZW')}</p>
           <p><strong>Contact:</strong> ${contact.email || contact.phone || 'None detected'}</p>
-          
           <h3>Job Posting:</h3>
           <div style="background:#f5f5f5;padding:15px;border-radius:8px;white-space:pre-wrap;">${job.body}</div>
-          
           <h3>AI Generated Cover Letter:</h3>
           <div style="background:#e8f5e9;padding:15px;border-radius:8px;white-space:pre-wrap;">${coverLetter || 'Could not generate'}</div>
-          
           <div style="margin-top:20px;text-align:center;">
-            <a href="https://jobhunter-backend-production.up.railway.app/approve/${appId}" 
+            <a href="https://jobhunter-backend-production.up.railway.app/approve/${appId}"
                style="background:#25D366;color:white;padding:12px 30px;border-radius:8px;text-decoration:none;font-weight:bold;margin-right:10px;">
               ✅ APPROVE & SEND
             </a>
@@ -235,21 +233,15 @@ Reply *SKIP_${appId}* to ignore this job
 }
 
 async function sendApplication(appId) {
-  const app = pendingApplications[appId];
-  if (!app || app.status !== 'pending') return false;
-  app.status = 'sent';
+  const pendingApp = pendingApplications[appId];
+  if (!pendingApp || pendingApp.status !== 'pending') return false;
+  pendingApp.status = 'sent';
 
-  const { job, coverLetter, contact } = app;
+  const { job, coverLetter, contact } = pendingApp;
+  const attachments = getAttachments();
 
-  // Send email application if email found
   if (contact.email) {
     try {
-      const cvPath = path.join(__dirname, 'cv.pdf');
-      const attachments = [];
-      if (fs.existsSync(cvPath)) {
-        attachments.push({ filename: 'Timothy_Jaravani_CV.pdf', path: cvPath });
-      }
-
       await transporter.sendMail({
         from: `Timothy Jaravani <${GMAIL_USER}>`,
         to: contact.email,
@@ -263,11 +255,10 @@ async function sendApplication(appId) {
     }
   }
 
-  // Send WhatsApp application if phone found
   if (contact.phone) {
     try {
       const phone = contact.phone.replace(/\D/g,'').replace(/^0/,'263');
-      const msg = coverLetter 
+      const msg = coverLetter
         ? coverLetter + '\n\n_CV available on request. Contact: jaraztimothy@gmail.com_'
         : `Dear Hiring Manager,\n\nI am Timothy Jaravani and I am interested in the advertised position. I have 3+ years experience in procurement and operations.\n\nPlease contact me:\nEmail: jaraztimothy@gmail.com\nPhone: +263 785 010 425`;
       await client.sendMessage(`${phone}@c.us`, msg);
@@ -277,25 +268,22 @@ async function sendApplication(appId) {
     }
   }
 
-  // Confirm to yourself
   try {
-    await client.sendMessage(`${MY_PHONE}@c.us`, 
-      `✅ *Application Sent!*\n\nJob from: ${job.chatName}\n${contact.email ? '📧 Email sent to: ' + contact.email : ''}${contact.phone ? '\n📱 WhatsApp sent to: ' + contact.phone : ''}\n\nGood luck Timothy! 🤞`
+    await client.sendMessage(`${MY_PHONE}@c.us`,
+      `✅ *Application Sent!*\n\nJob from: ${job.chatName}\n${contact.email ? '📧 Email sent to: ' + contact.email : ''}${contact.phone ? '\n📱 WhatsApp sent to: ' + contact.phone : ''}\n\n📎 Attachments sent: CV, Cover Letter, Certificates\n\nGood luck Timothy! 🤞`
     );
   } catch(e) {}
 
   return true;
 }
 
-// Listen for APPROVE/SKIP replies from yourself
 client.on('message', async (msg) => {
-  // Handle approval messages
   if (msg.from === `${MY_PHONE}@c.us`) {
     const text = msg.body.trim().toUpperCase();
     if (text.startsWith('APPROVE_')) {
       const appId = text.replace('APPROVE_', '');
       const success = await sendApplication(appId);
-      await msg.reply(success ? '✅ Application sent!' : '❌ Application not found or already processed.');
+      await msg.reply(success ? '✅ Application sent with CV, Cover Letter & Certificates!' : '❌ Application not found or already processed.');
     } else if (text.startsWith('SKIP_')) {
       const appId = text.replace('SKIP_', '');
       if (pendingApplications[appId]) {
@@ -306,7 +294,6 @@ client.on('message', async (msg) => {
     return;
   }
 
-  // Handle new job messages
   if (!msg.body || msg.body.length < 10) return;
   try {
     const chat = await msg.getChat();
@@ -342,12 +329,12 @@ client.on('ready', async () => {
   }
 });
 
-// Approve/Skip via email links
 app.get('/approve/:appId', async (req, res) => {
   const success = await sendApplication(req.params.appId);
   res.send(`<html><body style="font-family:Arial;text-align:center;padding:50px;">
-    ${success ? '<h1 style="color:green;">✅ Application Sent!</h1><p>Your application has been sent successfully.</p>' 
-               : '<h1 style="color:red;">❌ Already Processed</h1><p>This application was already sent or skipped.</p>'}
+    ${success
+      ? '<h1 style="color:green;">✅ Application Sent!</h1><p>CV, Cover Letter & Certificates delivered successfully.</p>'
+      : '<h1 style="color:red;">❌ Already Processed</h1><p>This application was already sent or skipped.</p>'}
     </body></html>`);
 });
 
@@ -365,14 +352,13 @@ app.get('/status', (req, res) => {
 });
 
 app.get('/jobs', (req, res) => res.json(jobMessages));
-
 app.get('/pending', (req, res) => res.json(pendingApplications));
 
 app.get('/qr', (req, res) => {
   if (isReady) {
     res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:40px;background:#f0f0f0;">
       <h1 style="color:green;">✅ WhatsApp Connected!</h1>
-      <p>Jobs found: ${jobMessages.length} | Pending applications: ${Object.keys(pendingApplications).length}</p>
+      <p>Jobs found: ${jobMessages.length} | Pending: ${Object.keys(pendingApplications).length}</p>
       </body></html>`);
   } else if (qrCodeData) {
     res.send(`<html><head><meta http-equiv="refresh" content="30"></head>
